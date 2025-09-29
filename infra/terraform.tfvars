@@ -1,0 +1,5 @@
+rg_name     = "SecureRG"
+location    = "italynorth"
+webapp_name = "securewebapp3380"
+kv_name     = "kv-securewebapp3380"
+db_password = "TempPassword123!"

@@ -1,0 +1,130 @@
+name: Secure CI/CD
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      id-token: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x # Updated from 8.0.x to 9.0.x
+      # 🔍 SAST
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+      # Build & Test
+      - name: Build
+        run: |
+          cd SecureWebApp
+          dotnet build --configuration Release
+      - name: Test
+        run: |
+          cd SecureWebApp
+          dotnet test --configuration Release
+      # CodeQL Analysis
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+      # Dependency Review (pull requests only)
+      - name: Dependency Review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+      # Azure Login
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      # Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ~1.0
+      - name: Terraform Init
+        run: |
+          cd infra
+          terraform init
+      - name: Terraform Validate
+        run: |
+          cd infra
+          terraform validate
+      - name: Terraform Plan
+        run: |
+          cd infra
+          terraform plan -out=tfplan
+      - name: Terraform Apply
+        run: |
+          cd infra
+          terraform apply -auto-approve tfplan
+      # Fix .NET Runtime Version (NEW STEP)
+      - name: Set .NET 9.0 Runtime
+        run: |
+          echo "Setting .NET 9.0 runtime for both production and staging slots..."
+          az webapp config set --name ${{ secrets.AZURE_WEBAPP_NAME }} --resource-group ${{ secrets.AZURE_RG }} --linux-fx-version "DOTNETCORE|9.0"
+          az webapp config set --name ${{ secrets.AZURE_WEBAPP_NAME }} --resource-group ${{ secrets.AZURE_RG }} --slot staging --linux-fx-version "DOTNETCORE|9.0"
+          echo "Waiting for containers to restart with .NET 9.0..."
+          sleep 120
+      # Build & Publish .NET App
+      - name: Publish App
+        run: |
+          cd SecureWebApp
+          dotnet publish --configuration Release --output ../publish
+          cd ../publish && zip -r ../SecureWebApp.zip . && cd ..
+      # Deploy to Staging
+      - name: Deploy to staging
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          slot-name: staging
+          package: SecureWebApp.zip
+      # Health Check
+      - name: Health check staging
+        run: |
+          for i in {1..10}; do
+            curl -fs https://${{ secrets.AZURE_WEBAPP_NAME }}-staging.azurewebsites.net && break
+            sleep 10
+          done
+      # DAST (OWASP ZAP)
+      - name: OWASP ZAP Scan
+        run: |
+          docker run --rm \
+            -v $(pwd):/zap/wrk/:rw \
+            -t softwaresecurityproject/zap-stable:latest \
+            zap-baseline.py \
+            -t https://${{ secrets.AZURE_WEBAPP_NAME }}-staging.azurewebsites.net \
+            -I || true
+      # Validate Key Vault
+      - name: Validate Key Vault Secret
+        run: |
+          SECRET=$(az keyvault secret show \
+            --vault-name ${{ secrets.KV_NAME }} \
+            --name DbPassword \
+            --query value -o tsv)
+          if [ -z "$SECRET" ]; then
+            exit 1
+          fi
+      # Manual Approval
+      - name: Await approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.token }}
+          approvers: ${{ secrets.APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Deploy to Production"
+      # Swap Staging → Production
+      - name: Swap to production
+        run: |
+          az webapp deployment slot swap \
+            -g ${{ secrets.AZURE_RG }} \
+            -n ${{ secrets.AZURE_WEBAPP_NAME }} \
+            --slot staging --target-slot production
