@@ -14,7 +14,7 @@ variable "location" {
 variable "webapp_name" {
   description = "Name of the web app"
   type        = string
-  default     = "securewebapp3380"
+  default     = "securewebapp33800"
 }
 
 variable "kv_name" {
