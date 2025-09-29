@@ -109,7 +109,7 @@ jobs:
       - name: Validate Key Vault Secret
         run: |
           SECRET=$(az keyvault secret show \
-            --vault-name ${{ secrets.KV_NAME }} \
+            --vault-name kv-securewebapp3380 \
             --name DbPassword \
             --query value -o tsv)
           if [ -z "$SECRET" ]; then
